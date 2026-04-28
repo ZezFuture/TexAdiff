@@ -3,5 +3,5 @@ Code for Remote Sensing Image Super-Resolution for Imbalanced Textures: A Textur
 
 The paper is accepted by CVPR.
 
-The code will be released before April 20.
+The code will be released before April 30.
 
