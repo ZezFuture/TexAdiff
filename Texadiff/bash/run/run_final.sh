@@ -15,7 +15,6 @@ python3 run.py --pretrained_model_name_or_path "checkpoint/stable-diffusion-xl-b
     --first_stage_model_config "config/psr_rtdm.yaml" \
     --num_validation_images 1 \
     --color_fix \
-    --sr_model \
     --guidance_scale 5 \
     --thr 0.35 \
     --min_area 1000 \
