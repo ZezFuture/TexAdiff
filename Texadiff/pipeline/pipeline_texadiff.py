@@ -444,7 +444,7 @@ class StableDiffusionXLTexADiffPipeline(
     ):
         if 'weight_name' not in kwargs:
             kwargs['weight_name'] = UNET_WEIGHT_NAME_SAFE if kwargs.get('use_safetensors', False) else UNET_WEIGHT_NAME
-        return cls.controlnext_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
+        return cls.texadiff_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
 
     def load_minicontrolnet_weights(
         self,
