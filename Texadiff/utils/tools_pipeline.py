@@ -1,0 +1,120 @@
+import gc
+import torch
+from diffusers import UniPCMultistepScheduler, AutoencoderKL, ControlNetModel
+from pipeline.pipeline_texadiff import StableDiffusionXLTexADiffPipeline
+from models.unet import UNet2DConditionModel
+from models.minicontrolnet import ControlNetModel
+
+
+CONTROLNET_CONFIG = {
+    'in_channels': [128, 128,256],
+    'out_channels': [128, 256,256],
+    'groups': [4, 8, 16],
+    'time_embed_dim': 256,
+    'final_out_channels': 320,
+    '_use_default_values': ['time_embed_dim', 'groups', 'in_channels', 'final_out_channels', 'out_channels']
+}
+
+
+def get_pipeline(
+    pretrained_model_name_or_path,
+    unet_model_name_or_path,
+    controlnet_model_name_or_path,
+    vae_model_name_or_path=None,
+    lora_path=None,
+    load_weight_increasement=False,
+    enable_xformers_memory_efficient_attention=False,
+    revision=None,
+    variant=None,
+    hf_cache_dir=None,
+    use_safetensors=True,
+    device=None,
+    args=None,
+):
+    pipeline_init_kwargs = {}
+
+    print(f"loading unet from {pretrained_model_name_or_path}")
+    unet = UNet2DConditionModel.from_pretrained_orig(
+            pretrained_model_name_or_path,
+            cache_dir=hf_cache_dir,
+            variant=variant,
+            #torch_dtype=torch.float16,
+            use_safetensors=use_safetensors,
+            subfolder="unet",
+        )
+    unet = unet.to(dtype=torch.float16)
+    pipeline_init_kwargs["unet"] = unet
+
+    if vae_model_name_or_path is not None:
+        print(f"loading vae from {vae_model_name_or_path}")
+        vae = AutoencoderKL.from_pretrained(vae_model_name_or_path, cache_dir=hf_cache_dir, torch_dtype=torch.float16).to(device)
+        pipeline_init_kwargs["vae"] = vae
+
+    if controlnet_model_name_or_path is not None:
+        pipeline_init_kwargs["controlnet"] = ControlNetModel().to(device, dtype=torch.float32)  # init
+
+    print(f"loading pipeline from {pretrained_model_name_or_path}")
+    pipeline: StableDiffusionXLTexADiffPipeline = StableDiffusionXLTexADiffPipeline.from_pretrained(
+            pretrained_model_name_or_path,
+            revision=revision,
+            variant=variant,
+            use_safetensors=use_safetensors,
+            cache_dir=hf_cache_dir,
+            **pipeline_init_kwargs,
+        )
+
+    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
+    if unet_model_name_or_path is not None:
+        print(f"loading unet from {unet_model_name_or_path}")
+        pipeline.load_unet_weights(
+            unet_model_name_or_path,
+            load_weight_increasement=load_weight_increasement,
+            use_safetensors=True,
+            torch_dtype=torch.float16,
+            cache_dir=hf_cache_dir,
+        )
+    if controlnet_model_name_or_path is not None:
+        print(f"loading minicontrolnet from {controlnet_model_name_or_path}")
+        pipeline.load_minicontrolnet_weights(
+            controlnet_model_name_or_path,
+            use_safetensors=True,
+            torch_dtype=torch.float32,
+            cache_dir=hf_cache_dir,
+        )
+    pipeline.set_progress_bar_config()
+    pipeline = pipeline.to(device, dtype=torch.float16)
+
+    if lora_path is not None:
+        pipeline.load_lora_weights(lora_path)
+    if enable_xformers_memory_efficient_attention:
+        pipeline.enable_xformers_memory_efficient_attention()
+
+    gc.collect()
+    if str(device) == 'cuda' and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return pipeline
+
+
+def get_scheduler(
+    scheduler_name,
+    scheduler_config,
+):
+    if scheduler_name == 'Euler A':
+        from diffusers.schedulers import EulerAncestralDiscreteScheduler
+        scheduler = EulerAncestralDiscreteScheduler.from_config(scheduler_config)
+    elif scheduler_name == 'UniPC':
+        from diffusers.schedulers import UniPCMultistepScheduler
+        scheduler = UniPCMultistepScheduler.from_config(scheduler_config)
+    elif scheduler_name == 'Euler':
+        from diffusers.schedulers import EulerDiscreteScheduler
+        scheduler = EulerDiscreteScheduler.from_config(scheduler_config)
+    elif scheduler_name == 'DDIM':
+        from diffusers.schedulers import DDIMScheduler
+        scheduler = DDIMScheduler.from_config(scheduler_config)
+    elif scheduler_name == 'DDPM':
+        from diffusers.schedulers import DDPMScheduler
+        scheduler = DDPMScheduler.from_config(scheduler_config)
+    else:
+        raise ValueError(f"Unknown scheduler: {scheduler_name}")
+    return scheduler

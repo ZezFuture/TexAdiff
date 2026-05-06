@@ -1,0 +1,24 @@
+model:
+  PSR:
+    target: models.swinir.SwinIR
+    params:
+      upscale: 4
+      in_chans: 3
+      img_size: 64
+      window_size: 8
+      img_range: 1.
+      depths: [6, 6, 6, 6, 6, 6 ]
+      embed_dim: 180
+      num_heads: [6, 6, 6, 6, 6, 6 ]
+      mlp_ratio: 2
+      upsampler: 'nearest+conv'
+      resi_connection: '1conv'
+
+  RTDM:
+    target: models.LRHRMaskNet.LRHRMaskNet
+    params:
+      in_channels: 3
+
+train:
+  psr_path: "checkpoint/swinir/Swinirmse_4_200000.pth"
+  rtdm_path: "train_ckpt/maskmodelv4/checkpoints/checkpoint-50000/diffmodel.pth"
