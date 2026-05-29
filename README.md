@@ -11,8 +11,8 @@ ENzhuo, Zhang, Sijie, Zhao,  Dilxat Muhtar, Zhenshi Li, [Xueliang Zhang](https:/
 :star: If Texadiff is helpful to your images or projects, please help star this repo. Thank you! :point_left:
 
 ## :runner: TODO
-- [] Release Checkpoints
-- [] Release inference code
+- [x] Release Checkpoints
+- [x] Release inference code
 - [] Release training code 
 
 ## :wrench: Dependencies and Installation
