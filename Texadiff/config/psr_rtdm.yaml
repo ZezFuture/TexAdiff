@@ -20,5 +20,5 @@ model:
       in_channels: 3
 
 train:
-  psr_path: "checkpoints/psrmodel.pth"
-  rtdm_path: "checkpoints/rtdmmodel.pth"
+  psr_path: "checkpoints/TexADiff/psrmodel.pth"
+  rtdm_path: "checkpoints/TexADiff/rtdmmodel.pth"
