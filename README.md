@@ -25,12 +25,12 @@ cd Texadiff
 ```
 
 2. Install packages
-    ```bash
-    conda create -n texadiff python=3.10 -y
-    conda activate texadiff
-    pip install --upgrade pip
-    pip install -r requirements.txt
-    ```
+```bash
+conda create -n texadiff python=3.10 -y
+conda activate texadiff
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
 ## :surfer: Quick Inference
 
@@ -57,13 +57,13 @@ bash bash/run/run_final.sh
 The processed results will be saved in the `[output]` directory.
 
 
-## :book: Citation
+<!-- ## :book: Citation
 
 If you find our repo useful for your research, please consider citing our paper:
 
 ```bibtex
 
-```
+``` -->
 
 ## Acknowledgments
 Our project is based on [diffusers](https://github.com/huggingface/diffusers), [controlnext](https://github.com/JIA-Lab-research/ControlNeXt) and [pasd](https://github.com/yangxy/PASD).
