@@ -1,14 +1,12 @@
-
-
-python3 run.py --pretrained_model_name_or_path "checkpoint/stable-diffusion-xl-base-1.0" \
-    --unet_model_name_or_path "" \
-    --controlnet_model_name_or_path "" \
+python3 run.py --pretrained_model_name_or_path "/home/nju/zez/ADRSSR/checkpoint/stable-diffusion-xl-base-1.0" \
+    --unet_model_name_or_path checkpoints/TexADiff \
+    --controlnet_model_name_or_path checkpoints/TexADiff \
     --controlnet_scale 1.0 \
-    --vae_model_name_or_path "checkpoint/sdxl-vae-fp16-fix" \
-    --validation_prompt "high-resolution. 8k, clean" \
+    --vae_model_name_or_path "checkpoints/sdxl-vae-fp16-fix" \
+    --validation_prompt "high-resolution, 8k, clean" \
     --negative_prompt "blurry, dotted, noise, raster lines, unclear, low-resolution, over-smoothed" \
-    --validation_image "" \
-    --output_dir "" \
+    --validation_image "test_data" \
+    --output_dir "output" \
     --variant fp16 \
     --num_inference_steps 20 \
     --use_safetensors \
@@ -18,4 +16,3 @@ python3 run.py --pretrained_model_name_or_path "checkpoint/stable-diffusion-xl-b
     --guidance_scale 5 \
     --thr 0.35 \
     --min_area 1000 \
-
