@@ -20,5 +20,5 @@ model:
       in_channels: 3
 
 train:
-  psr_path: "checkpoint/swinir/Swinirmse_4_200000.pth"
-  rtdm_path: "train_ckpt/maskmodelv4/checkpoints/checkpoint-50000/diffmodel.pth"
+  psr_path: "checkpoints/psrmodel.pth"
+  rtdm_path: "checkpoints/rtdmmodel.pth"
