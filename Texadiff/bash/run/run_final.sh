@@ -1,4 +1,6 @@
-python3 run.py --pretrained_model_name_or_path "/home/nju/zez/ADRSSR/checkpoint/stable-diffusion-xl-base-1.0" \
+
+
+python3 run.py --pretrained_model_name_or_path "checkpoints/stable-diffusion-xl-base-1.0" \
     --unet_model_name_or_path checkpoints/TexADiff \
     --controlnet_model_name_or_path checkpoints/TexADiff \
     --controlnet_scale 1.0 \
@@ -16,3 +18,4 @@ python3 run.py --pretrained_model_name_or_path "/home/nju/zez/ADRSSR/checkpoint/
     --guidance_scale 5 \
     --thr 0.35 \
     --min_area 1000 \
+
