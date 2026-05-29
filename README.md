@@ -1,6 +1,6 @@
 # Remote Sensing Image Super-Resolution for Imbalanced Textures: A Texture-Aware Diffusion Framework (CVPR2026)
 
-<a href=' '>< img src='https://img.shields.io/badge/Paper-Arxiv-b31b1b.svg'></a > &nbsp;&nbsp;
+<a href='https://arxiv.org/abs/2604.13994'>< img src='https://img.shields.io/badge/Paper-Arxiv-b31b1b.svg'></a > &nbsp;&nbsp;
 
 This is the official PyTorch codes for the paper:
 >**Remote Sensing Image Super-Resolution for Imbalanced Textures: A Texture-Aware Diffusion Framework**<br>  
