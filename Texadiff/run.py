@@ -60,10 +60,10 @@ def load_first_stage_models(config_path: str, device: str):
     cfg = OmegaConf.load(config_path)
 
     psr_model = instantiate_from_config(cfg.model.PSR)
-    psr_ckpt = torch.load(cfg.train.sr_path, map_location="cpu")
+    psr_ckpt = torch.load(cfg.train.psr_path, map_location="cpu")
     psr_key = "params_ema" if "params_ema" in psr_ckpt else "params"
     psr_model.load_state_dict(psr_ckpt[psr_key], strict=True)
-    print(f"Loaded PSR model from: {cfg.train.sr_path}")
+    print(f"Loaded PSR model from: {cfg.train.psr_path}")
 
     rtdm_model = instantiate_from_config(cfg.model.RTDM)
     rtdm_ckpt = torch.load(cfg.train.rtdm_path, map_location="cpu")
@@ -256,7 +256,7 @@ def run_inference(args, device="cuda"):
 
         rtdm = build_rtdm(
             lr_tensor=lr_tensor,
-            sr_model=psr_model,
+            psr_model=psr_model,
             rtdm_model=rtdm_model,
             args=args,
         ).to(device)
