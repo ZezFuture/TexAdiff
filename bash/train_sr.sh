@@ -1,0 +1,27 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch train_sr.py --pretrained_model_name_or_path "checkpoints/stable-diffusion-xl-base-1.0" \
+--pretrained_vae_model_name_or_path "checkpoints/sdxl-vae-fp16-fix" \
+--use_safetensors \
+--output_dir "exp/" \
+--max_train_steps  30000 \
+--resolution 512 \
+--gradient_checkpointing \
+--set_grads_to_none \
+--proportion_empty_prompts 0.2 \
+--controlnet_scale_factor 1.0 \
+--mixed_precision 'fp16' \
+--enable_xformers_memory_efficient_attention \
+--train_data_dir "data/train" \
+--train_batch_size 16 \
+--first_stage_model_config "config/psr_rtdm.yaml" \
+--dataloader_num_workers 16 \
+--checkpointing_steps 5000 \
+--learning_rate_controlnet 5e-6 \
+--learning_rate 5e-5 \
+--allow_tf32 \
+--gradient_accumulation_steps 4 \
+--lr_scheduler "cosine" \
+--lr_warmup_steps 300 \
+--unet_trainable_param_pattern 'conv_in|down_blocks\.0|up_blocks\.[012]' \
+--optimizer_type 'adamw' \
+--thr_start 0.35 \
+--thr_end 0.40

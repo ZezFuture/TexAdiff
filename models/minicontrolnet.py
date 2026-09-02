@@ -9,11 +9,6 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.resnet import ResnetBlock2D
 
 
-def zero_module(module: nn.Module) -> nn.Module:
-    for p in module.parameters():
-        nn.init.zeros_(p)
-    return module
-
 
 def conv_gn_silu(
     in_channels: int,
@@ -176,13 +171,12 @@ class ControlNetModel(ModelMixin, ConfigMixin):
             ]
         )
 
-        self.controlnet_mid_block = zero_module(
-            nn.Conv2d(
+        self.controlnet_mid_block = nn.Conv2d(
                 final_out_channels,
                 final_out_channels,
                 kernel_size=1,
             )
-        )
+        
 
         self.scale = 1.0
 

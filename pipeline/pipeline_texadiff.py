@@ -13,8 +13,11 @@
 # limitations under the License.
 
 import inspect
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import torch
+from safetensors.torch import load_file
 from transformers import (
     CLIPImageProcessor,
     CLIPTextModel,
@@ -45,7 +48,6 @@ from diffusers.models.lora import adjust_lora_scale_text_encoder
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.utils import (
     USE_PEFT_BACKEND,
-    deprecate,
     is_invisible_watermark_available,
     is_torch_xla_available,
     logging,
@@ -56,7 +58,6 @@ from diffusers.utils import (
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import StableDiffusionXLPipelineOutput
-from huggingface_hub.utils import validate_hf_hub_args
 
 if is_invisible_watermark_available():
     from diffusers.pipelines.stable_diffusion_xl.watermark import StableDiffusionXLWatermarker
@@ -86,124 +87,26 @@ EXAMPLE_DOC_STRING = """
         >>> image = pipe(prompt).images[0]
         ```
 """
-MINICONTROLNET_WEIGHT_NAME = "controlnet.bin"
-MINICONTROLNET_WEIGHT_NAME_SAFE = "controlnet.safetensors"
-UNET_WEIGHT_NAME = "unet.bin"
-UNET_WEIGHT_NAME_SAFE = "unet.safetensors"
+CONTROLNET_WEIGHT_NAME = "controlnet.safetensors"
+UNET_WEIGHT_NAME = "unet.safetensors"
 
 
-# Copied from https://github.com/kohya-ss/sd-scripts/blob/main/library/sdxl_model_util.py
+def load_local_safetensors(checkpoint_dir, weight_name):
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.is_dir():
+        raise NotADirectoryError(
+            f"Checkpoint directory does not exist: {checkpoint_dir}"
+        )
 
-def is_sdxl_state_dict(state_dict):
-    return any(key.startswith('input_blocks') for key in state_dict.keys())
+    weight_path = checkpoint_dir / weight_name
+    if not weight_path.is_file():
+        raise FileNotFoundError(f"Weight file does not exist: {weight_path}")
 
+    state_dict = load_file(str(weight_path), device="cpu")
+    if not state_dict:
+        raise ValueError(f"Weight file is empty: {weight_path}")
 
-def convert_sdxl_unet_state_dict_to_diffusers(sd):
-    unet_conversion_map = make_unet_conversion_map()
-
-    conversion_dict = {sd: hf for sd, hf in unet_conversion_map}
-    return convert_unet_state_dict(sd, conversion_dict)
-
-
-def convert_unet_state_dict(src_sd, conversion_map):
-    converted_sd = {}
-    for src_key, value in src_sd.items():
-        src_key_fragments = src_key.split(".")[:-1]  # remove weight/bias
-        while len(src_key_fragments) > 0:
-            src_key_prefix = ".".join(src_key_fragments) + "."
-            if src_key_prefix in conversion_map:
-                converted_prefix = conversion_map[src_key_prefix]
-                converted_key = converted_prefix + src_key[len(src_key_prefix):]
-                converted_sd[converted_key] = value
-                break
-            src_key_fragments.pop(-1)
-        assert len(src_key_fragments) > 0, f"key {src_key} not found in conversion map"
-
-    return converted_sd
-
-
-def make_unet_conversion_map():
-    unet_conversion_map_layer = []
-
-    for i in range(3):  # num_blocks is 3 in sdxl
-        # loop over downblocks/upblocks
-        for j in range(2):
-            # loop over resnets/attentions for downblocks
-            hf_down_res_prefix = f"down_blocks.{i}.resnets.{j}."
-            sd_down_res_prefix = f"input_blocks.{3*i + j + 1}.0."
-            unet_conversion_map_layer.append((sd_down_res_prefix, hf_down_res_prefix))
-
-            if i < 3:
-                # no attention layers in down_blocks.3
-                hf_down_atn_prefix = f"down_blocks.{i}.attentions.{j}."
-                sd_down_atn_prefix = f"input_blocks.{3*i + j + 1}.1."
-                unet_conversion_map_layer.append((sd_down_atn_prefix, hf_down_atn_prefix))
-
-        for j in range(3):
-            # loop over resnets/attentions for upblocks
-            hf_up_res_prefix = f"up_blocks.{i}.resnets.{j}."
-            sd_up_res_prefix = f"output_blocks.{3*i + j}.0."
-            unet_conversion_map_layer.append((sd_up_res_prefix, hf_up_res_prefix))
-
-            # if i > 0: commentout for sdxl
-            # no attention layers in up_blocks.0
-            hf_up_atn_prefix = f"up_blocks.{i}.attentions.{j}."
-            sd_up_atn_prefix = f"output_blocks.{3*i + j}.1."
-            unet_conversion_map_layer.append((sd_up_atn_prefix, hf_up_atn_prefix))
-
-        if i < 3:
-            # no downsample in down_blocks.3
-            hf_downsample_prefix = f"down_blocks.{i}.downsamplers.0.conv."
-            sd_downsample_prefix = f"input_blocks.{3*(i+1)}.0.op."
-            unet_conversion_map_layer.append((sd_downsample_prefix, hf_downsample_prefix))
-
-            # no upsample in up_blocks.3
-            hf_upsample_prefix = f"up_blocks.{i}.upsamplers.0."
-            sd_upsample_prefix = f"output_blocks.{3*i + 2}.{2}."  # change for sdxl
-            unet_conversion_map_layer.append((sd_upsample_prefix, hf_upsample_prefix))
-
-    hf_mid_atn_prefix = "mid_block.attentions.0."
-    sd_mid_atn_prefix = "middle_block.1."
-    unet_conversion_map_layer.append((sd_mid_atn_prefix, hf_mid_atn_prefix))
-
-    for j in range(2):
-        hf_mid_res_prefix = f"mid_block.resnets.{j}."
-        sd_mid_res_prefix = f"middle_block.{2*j}."
-        unet_conversion_map_layer.append((sd_mid_res_prefix, hf_mid_res_prefix))
-
-    unet_conversion_map_resnet = [
-        # (stable-diffusion, HF Diffusers)
-        ("in_layers.0.", "norm1."),
-        ("in_layers.2.", "conv1."),
-        ("out_layers.0.", "norm2."),
-        ("out_layers.3.", "conv2."),
-        ("emb_layers.1.", "time_emb_proj."),
-        ("skip_connection.", "conv_shortcut."),
-    ]
-
-    unet_conversion_map = []
-    for sd, hf in unet_conversion_map_layer:
-        if "resnets" in hf:
-            for sd_res, hf_res in unet_conversion_map_resnet:
-                unet_conversion_map.append((sd + sd_res, hf + hf_res))
-        else:
-            unet_conversion_map.append((sd, hf))
-
-    for j in range(2):
-        hf_time_embed_prefix = f"time_embedding.linear_{j+1}."
-        sd_time_embed_prefix = f"time_embed.{j*2}."
-        unet_conversion_map.append((sd_time_embed_prefix, hf_time_embed_prefix))
-
-    for j in range(2):
-        hf_label_embed_prefix = f"add_embedding.linear_{j+1}."
-        sd_label_embed_prefix = f"label_emb.0.{j*2}."
-        unet_conversion_map.append((sd_label_embed_prefix, hf_label_embed_prefix))
-
-    unet_conversion_map.append(("input_blocks.0.0.", "conv_in."))
-    unet_conversion_map.append(("out.0.", "conv_norm_out."))
-    unet_conversion_map.append(("out.2.", "conv_out."))
-
-    return unet_conversion_map
+    return state_dict, weight_path
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
 
@@ -221,65 +124,6 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
     return noise_cfg
 
-
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
-def retrieve_timesteps(
-    scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
-    **kwargs,
-):
-    """
-    Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
-    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
-
-    Args:
-        scheduler (`SchedulerMixin`):
-            The scheduler to get timesteps from.
-        num_inference_steps (`int`):
-            The number of diffusion steps used when generating samples with a pre-trained model. If used, `timesteps`
-            must be `None`.
-        device (`str` or `torch.device`, *optional*):
-            The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
-            Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
-            `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`List[float]`, *optional*):
-            Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
-            `num_inference_steps` and `timesteps` must be `None`.
-
-    Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
-        second element is the number of inference steps.
-    """
-    if timesteps is not None and sigmas is not None:
-        raise ValueError("Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values")
-    if timesteps is not None:
-        accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
-        if not accepts_timesteps:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
-                f" timestep schedules. Please check whether you are using the correct scheduler."
-            )
-        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-        num_inference_steps = len(timesteps)
-    elif sigmas is not None:
-        accept_sigmas = "sigmas" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
-        if not accept_sigmas:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
-                f" sigmas schedules. Please check whether you are using the correct scheduler."
-            )
-        scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-        num_inference_steps = len(timesteps)
-    else:
-        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-    return timesteps, num_inference_steps
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
@@ -417,143 +261,42 @@ class StableDiffusionXLTexADiffPipeline(
 
     def load_unet_weights(
         self,
-        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
-        load_weight_increasement: bool = False,
-        **kwargs,
+        checkpoint_dir,
     ):
-        if isinstance(pretrained_model_name_or_path_or_dict, dict):
-            pretrained_model_name_or_path_or_dict = pretrained_model_name_or_path_or_dict.copy()
-
-        state_dict = self.unet_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
-        if is_sdxl_state_dict(state_dict):
-            state_dict = convert_sdxl_unet_state_dict_to_diffusers(state_dict)
-
-        logger.info(f"Loading UNet" + (f" with weight increasement." if load_weight_increasement else "."))
-        if load_weight_increasement:
-            unet_sd = self.unet.state_dict()
-            for k in state_dict.keys():
-                state_dict[k] = state_dict[k] + unet_sd[k]
-        self.unet.load_state_dict(state_dict, strict=False)
-
-    @classmethod
-    @validate_hf_hub_args
-    def unet_state_dict(
-        cls,
-        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
-        **kwargs,
-    ):
-        if 'weight_name' not in kwargs:
-            kwargs['weight_name'] = UNET_WEIGHT_NAME_SAFE if kwargs.get('use_safetensors', False) else UNET_WEIGHT_NAME
-        return cls.texadiff_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
+        state_dict, weight_path = load_local_safetensors(
+            checkpoint_dir,
+            UNET_WEIGHT_NAME,
+        )
+        incompatible = self.unet.load_state_dict(state_dict, strict=False)
+        if incompatible.unexpected_keys:
+            raise RuntimeError(
+                "Unexpected U-Net weight keys: "
+                f"{incompatible.unexpected_keys}"
+            )
+        logger.info(
+            "Loaded %d partial U-Net tensors from %s",
+            len(state_dict),
+            weight_path,
+        )
 
     def load_minicontrolnet_weights(
         self,
-        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
-        **kwargs,
+        checkpoint_dir,
     ):
         if self.controlnet is None:
-            raise ValueError("No ControlNeXt ControlNet found in the pipeline.")
-        if isinstance(pretrained_model_name_or_path_or_dict, dict):
-            pretrained_model_name_or_path_or_dict = pretrained_model_name_or_path_or_dict.copy()
-
-        state_dict = self.minicontrolnet_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
-
-        logger.info(f"Loading Minicontrolnet")
-        self.controlnet.load_state_dict(state_dict, strict=True)
-
-    @classmethod
-    @validate_hf_hub_args
-    def minicontrolnet_state_dict(
-        cls,
-        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
-        **kwargs,
-    ):
-        if 'weight_name' not in kwargs:
-            kwargs['weight_name'] = MINICONTROLNET_WEIGHT_NAME_SAFE if kwargs.get('use_safetensors', False) else MINICONTROLNET_WEIGHT_NAME
-        return cls.texadiff_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
-
-    @classmethod
-    @validate_hf_hub_args
-    def texadiff_state_dict(
-        cls,
-        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
-        **kwargs,
-    ):
-        r"""
-        Return state dict for texadiff weights.
-
-        Parameters:
-            pretrained_model_name_or_path_or_dict (`str` or `os.PathLike` or `dict`):
-                Can be either:
-
-                    - A string, the *model id* (for example `google/ddpm-celebahq-256`) of a pretrained model hosted on
-                      the Hub.
-                    - A path to a *directory* (for example `./my_model_directory`) containing the model weights saved
-                      with [`ModelMixin.save_pretrained`].
-                    - A [torch state
-                      dict](https://pytorch.org/tutorials/beginner/saving_loading_models.html#what-is-a-state-dict).
-
-            cache_dir (`Union[str, os.PathLike]`, *optional*):
-                Path to a directory where a downloaded pretrained model configuration is cached if the standard cache
-                is not used.
-            force_download (`bool`, *optional*, defaults to `False`):
-                Whether or not to force the (re-)download of the model weights and configuration files, overriding the
-                cached versions if they exist.
-
-            proxies (`Dict[str, str]`, *optional*):
-                A dictionary of proxy servers to use by protocol or endpoint, for example, `{'http': 'foo.bar:3128',
-                'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
-            local_files_only (`bool`, *optional*, defaults to `False`):
-                Whether to only load local model weights and configuration files or not. If set to `True`, the model
-                won't be downloaded from the Hub.
-            token (`str` or *bool*, *optional*):
-                The token to use as HTTP bearer authorization for remote files. If `True`, the token generated from
-                `diffusers-cli login` (stored in `~/.huggingface`) is used.
-            revision (`str`, *optional*, defaults to `"main"`):
-                The specific model version to use. It can be a branch name, a tag name, a commit id, or any identifier
-                allowed by Git.
-            subfolder (`str`, *optional*, defaults to `""`):
-                The subfolder location of a model file within a larger model repository on the Hub or locally.
-            weight_name (`str`, *optional*, defaults to None):
-                Name of the serialized state dict file.
-        """
-        cache_dir = kwargs.pop("cache_dir", None)
-        force_download = kwargs.pop("force_download", False)
-        proxies = kwargs.pop("proxies", None)
-        local_files_only = kwargs.pop("local_files_only", None)
-        token = kwargs.pop("token", None)
-        revision = kwargs.pop("revision", None)
-        subfolder = kwargs.pop("subfolder", None)
-        weight_name = kwargs.pop("weight_name", None)
-        unet_config = kwargs.pop("unet_config", None)
-        use_safetensors = kwargs.pop("use_safetensors", None)
-
-        allow_pickle = False
-        if use_safetensors is None:
-            use_safetensors = True
-            allow_pickle = True
-
-        user_agent = {
-            "file_type": "attn_procs_weights",
-            "framework": "pytorch",
-        }
-
-        state_dict = cls._fetch_state_dict(
-            pretrained_model_name_or_path_or_dict=pretrained_model_name_or_path_or_dict,
-            weight_name=weight_name,
-            use_safetensors=use_safetensors,
-            local_files_only=local_files_only,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            proxies=proxies,
-            token=token,
-            revision=revision,
-            subfolder=subfolder,
-            user_agent=user_agent,
-            allow_pickle=allow_pickle,
+            raise ValueError(
+                "Cannot load weights because MiniControlNet is not initialized."
+            )
+        state_dict, weight_path = load_local_safetensors(
+            checkpoint_dir,
+            CONTROLNET_WEIGHT_NAME,
         )
-
-        return state_dict
+        self.controlnet.load_state_dict(state_dict, strict=True)
+        logger.info(
+            "Loaded %d MiniControlNet tensors from %s",
+            len(state_dict),
+            weight_path,
+        )
 
     def prepare_image(
         self,
@@ -819,83 +562,6 @@ class StableDiffusionXLTexADiffPipeline(
                 unscale_lora_layers(self.text_encoder_2, lora_scale)
 
         return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
-    def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
-        dtype = next(self.image_encoder.parameters()).dtype
-
-        if not isinstance(image, torch.Tensor):
-            image = self.feature_extractor(image, return_tensors="pt").pixel_values
-
-        image = image.to(device=device, dtype=dtype)
-        if output_hidden_states:
-            image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
-            image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
-            uncond_image_enc_hidden_states = self.image_encoder(
-                torch.zeros_like(image), output_hidden_states=True
-            ).hidden_states[-2]
-            uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
-                num_images_per_prompt, dim=0
-            )
-            return image_enc_hidden_states, uncond_image_enc_hidden_states
-        else:
-            image_embeds = self.image_encoder(image).image_embeds
-            image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-            uncond_image_embeds = torch.zeros_like(image_embeds)
-
-            return image_embeds, uncond_image_embeds
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_ip_adapter_image_embeds
-    def prepare_ip_adapter_image_embeds(
-        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt, do_classifier_free_guidance
-    ):
-        if ip_adapter_image_embeds is None:
-            if not isinstance(ip_adapter_image, list):
-                ip_adapter_image = [ip_adapter_image]
-
-            if len(ip_adapter_image) != len(self.unet.encoder_hid_proj.image_projection_layers):
-                raise ValueError(
-                    f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
-                )
-
-            image_embeds = []
-            for single_ip_adapter_image, image_proj_layer in zip(
-                ip_adapter_image, self.unet.encoder_hid_proj.image_projection_layers
-            ):
-                output_hidden_state = not isinstance(image_proj_layer, ImageProjection)
-                single_image_embeds, single_negative_image_embeds = self.encode_image(
-                    single_ip_adapter_image, device, 1, output_hidden_state
-                )
-                single_image_embeds = torch.stack([single_image_embeds] * num_images_per_prompt, dim=0)
-                single_negative_image_embeds = torch.stack(
-                    [single_negative_image_embeds] * num_images_per_prompt, dim=0
-                )
-
-                if do_classifier_free_guidance:
-                    single_image_embeds = torch.cat([single_negative_image_embeds, single_image_embeds])
-                    single_image_embeds = single_image_embeds.to(device)
-
-                image_embeds.append(single_image_embeds)
-        else:
-            repeat_dims = [1]
-            image_embeds = []
-            for single_image_embeds in ip_adapter_image_embeds:
-                if do_classifier_free_guidance:
-                    single_negative_image_embeds, single_image_embeds = single_image_embeds.chunk(2)
-                    single_image_embeds = single_image_embeds.repeat(
-                        num_images_per_prompt, *(repeat_dims * len(single_image_embeds.shape[1:]))
-                    )
-                    single_negative_image_embeds = single_negative_image_embeds.repeat(
-                        num_images_per_prompt, *(repeat_dims * len(single_negative_image_embeds.shape[1:]))
-                    )
-                    single_image_embeds = torch.cat([single_negative_image_embeds, single_image_embeds])
-                else:
-                    single_image_embeds = single_image_embeds.repeat(
-                        num_images_per_prompt, *(repeat_dims * len(single_image_embeds.shape[1:]))
-                    )
-                image_embeds.append(single_image_embeds)
-
-        return image_embeds
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -1262,45 +928,21 @@ class StableDiffusionXLTexADiffPipeline(
     def interrupt(self):
         return self._interrupt
 
-
-    def _gaussian_weights(self, tile_width, tile_height, nbatches):
-        """Generates a gaussian mask of weights for tile contributions"""
-        from numpy import pi, exp, sqrt
-        import numpy as np
-
-        latent_width = tile_width
-        latent_height = tile_height
-
-        var = 0.01
-        midpoint = (latent_width - 1) / 2  # -1 because index goes from 0 to latent_width - 1
-        x_probs = [exp(-(x-midpoint)*(x-midpoint)/(latent_width*latent_width)/(2*var)) / sqrt(2*pi*var) for x in range(latent_width)]
-        midpoint = latent_height / 2
-        y_probs = [exp(-(y-midpoint)*(y-midpoint)/(latent_height*latent_height)/(2*var)) / sqrt(2*pi*var) for y in range(latent_height)]
-
-        weights = np.outer(y_probs, x_probs)
-        return torch.tile(torch.tensor(weights, device=self.device), (nbatches, self.unet.config.in_channels, 1, 1))
-
-
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        args=None,
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
         image: Optional[PipelineImageInput] = None,
-        sr_image: Optional[PipelineImageInput] = None,
         mask_image: PipelineImageInput = None,
-        controlnet_image: Optional[PipelineImageInput] = None,
-        controlnet_scale: Optional[float] = 1.0,
+        controlnet_image: PipelineImageInput = None,
+        controlnet_scale: float = 1.0,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength = 1,
         num_inference_steps: int = 50,
         denoising_start: Optional[float] = None,
-        denoising_end: Optional[float] = None,
-        timesteps: List[int] = None,
-        sigmas: List[float] = None,
         guidance_scale: float = 5.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
@@ -1312,8 +954,6 @@ class StableDiffusionXLTexADiffPipeline(
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         pooled_prompt_embeds: Optional[torch.Tensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        ip_adapter_image: Optional[PipelineImageInput] = None,
-        ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -1329,8 +969,6 @@ class StableDiffusionXLTexADiffPipeline(
             Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        aesthetic_score: Optional[int] = None,
-        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1355,21 +993,6 @@ class StableDiffusionXLTexADiffPipeline(
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
-            timesteps (`List[int]`, *optional*):
-                Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
-                in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
-                passed will be used. Must be in descending order.
-            sigmas (`List[float]`, *optional*):
-                Custom sigmas to use for the denoising process with schedulers which support a `sigmas` argument in
-                their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is passed
-                will be used.
-            denoising_end (`float`, *optional*):
-                When specified, determines the fraction (between 0.0 and 1.0) of the total denoising process to be
-                completed before it is intentionally prematurely terminated. As a result, the returned sample will
-                still retain a substantial amount of noise as determined by the discrete timesteps selected by the
-                scheduler. The denoising_end parameter should ideally be utilized when this pipeline forms a part of a
-                "Mixture of Denoisers" multi-pipeline setup, as elaborated in [**Refining the Image
-                Output**](https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/stable_diffusion_xl#refining-the-image-output)
             guidance_scale (`float`, *optional*, defaults to 5.0):
                 Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
                 `guidance_scale` is defined as `w` of equation 2. of [Imagen
@@ -1409,12 +1032,6 @@ class StableDiffusionXLTexADiffPipeline(
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
-            ip_adapter_image: (`PipelineImageInput`, *optional*): Optional image input to work with IP Adapters.
-            ip_adapter_image_embeds (`List[torch.Tensor]`, *optional*):
-                Pre-generated image embeddings for IP-Adapter. It should be a list of length same as number of
-                IP-adapters. Each element should be a tensor of shape `(batch_size, num_images, emb_dim)`. It should
-                contain the negative image embedding if `do_classifier_free_guidance` is set to `True`. If not
-                provided, embeddings are computed from the `ip_adapter_image` input argument.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
@@ -1476,33 +1093,26 @@ class StableDiffusionXLTexADiffPipeline(
             [`~pipelines.stable_diffusion_xl.StableDiffusionXLPipelineOutput`] if `return_dict` is True, otherwise a
             `tuple`. When returning a tuple, the first element is a list with the generated images.
         """
-        callback = kwargs.pop("callback", None)
-        callback_steps = kwargs.pop("callback_steps", None)
-
-        if callback is not None:
-            deprecate(
-                "callback",
-                "1.0.0",
-                "Passing `callback` as an input argument to `__call__` is deprecated, consider use `callback_on_step_end`",
-            )
-        if callback_steps is not None:
-            deprecate(
-                "callback_steps",
-                "1.0.0",
-                "Passing `callback_steps` as an input argument to `__call__` is deprecated, consider use `callback_on_step_end`",
-            )
-
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
-        # 0. Default height and width to unet,aesthetic_score
+        # 0. Default height and width to the U-Net sample size.
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
         original_size = original_size or (height, width)
         target_size = target_size or (height, width)
-        if aesthetic_score is not  None:
-            aesthetic_score = aesthetic_score
+
+        if self.controlnet is None:
+            raise ValueError("TexADiff inference requires a MiniControlNet model.")
+        if controlnet_image is None:
+            raise ValueError("`controlnet_image` is required for TexADiff inference.")
+        if mask_image is None:
+            raise ValueError("`mask_image` is required for TexADiff inference.")
+        if not isinstance(controlnet_image, torch.Tensor):
+            raise TypeError("`controlnet_image` must be a BCHW torch.Tensor.")
+        if not isinstance(mask_image, torch.Tensor):
+            raise TypeError("`mask_image` must be a BCHW torch.Tensor.")
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -1510,15 +1120,15 @@ class StableDiffusionXLTexADiffPipeline(
             prompt_2,
             height,
             width,
-            callback_steps,
+            None,
             negative_prompt,
             negative_prompt_2,
             prompt_embeds,
             negative_prompt_embeds,
             pooled_prompt_embeds,
             negative_pooled_prompt_embeds,
-            ip_adapter_image,
-            ip_adapter_image_embeds,
+            None,
+            None,
             callback_on_step_end_tensor_inputs,
         )
 
@@ -1526,7 +1136,7 @@ class StableDiffusionXLTexADiffPipeline(
         self._guidance_rescale = guidance_rescale
         self._clip_skip = clip_skip
         self._cross_attention_kwargs = cross_attention_kwargs
-        self._denoising_end = denoising_end
+        self._denoising_end = None
         self._interrupt = False
 
         # 2. Define call parameters
@@ -1588,25 +1198,22 @@ class StableDiffusionXLTexADiffPipeline(
         self._num_timesteps = len(timesteps)
 
         # 4.2 Prepare control images
-        if controlnet_image is not None and self.controlnet is not None:
-            controlnet_image = self.prepare_image(
-                controlnet_image,
-                controlnet_image.shape[-1],
-                controlnet_image.shape[-2],
-                batch_size* num_images_per_prompt,
-                num_images_per_prompt,
-                device,
-                self.controlnet.dtype,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
-            )
+        controlnet_image = self.prepare_image(
+            controlnet_image,
+            controlnet_image.shape[-1],
+            controlnet_image.shape[-2],
+            batch_size * num_images_per_prompt,
+            num_images_per_prompt,
+            device,
+            self.controlnet.dtype,
+            do_classifier_free_guidance=self.do_classifier_free_guidance,
+        )
 
         # 5. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
-        num_channels_unet = self.unet.config.in_channels
-        return_image_latents = False
 
         add_noise = True if denoising_start is None else False
-        latents_outputs = self.prepare_latents(
+        latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -1619,27 +1226,20 @@ class StableDiffusionXLTexADiffPipeline(
             timestep=latent_timestep,
             is_strength_max=is_strength_max,
             add_noise=add_noise,
-            return_noise=True,
-            return_image_latents=return_image_latents,
-        )
-
-        if return_image_latents:
-            latents, noise, image_latents = latents_outputs
-        else:
-            latents, noise = latents_outputs
-
+            return_noise=False,
+            return_image_latents=False,
+        )[0]
 
         # 5.1 prepare mask
         # mask_image which is located at [0,1] is torch.tensor, Convert it to a binary image using 0.5 as the threshold.
-        if mask_image is not None:
-            mask_binary = (mask_image > 0.5).float()
-            mask = self.prepare_mask(
-                mask_binary,
-                batch_size * num_images_per_prompt,
-                prompt_embeds.dtype,
-                device,
-                self.do_classifier_free_guidance,
-            )
+        mask_binary = (mask_image > 0.5).float()
+        mask = self.prepare_mask(
+            mask_binary,
+            batch_size * num_images_per_prompt,
+            prompt_embeds.dtype,
+            device,
+            self.do_classifier_free_guidance,
+        )
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -1714,36 +1314,24 @@ class StableDiffusionXLTexADiffPipeline(
 
                 # predict the noise residual
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
-                if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
-                    added_cond_kwargs["image_embeds"] = image_embeds
+                controls = self.controlnet(
+                    controlnet_image,
+                    mask,
+                    latent_model_input,
+                    t,
+                )
+                controls["scale"] *= controlnet_scale
 
-                unet_additional_args = {}
-                _, _, h, w = latent_model_input.size()
-                tile_size, tile_overlap = (args.latent_tiled_size, args.latent_tiled_overlap) if args is not None else (
-                256, 8)
-                if True:
-                    if self.controlnet is not None:
-                        controls = self.controlnet(
-                            controlnet_image,
-                            mask,
-                            latent_model_input,
-                            t,
-                        )
-
-
-                    controls['scale'] *= controlnet_scale
-                    unet_additional_args["controls"] = controls
-
-                    noise_pred = self.unet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states=prompt_embeds,
-                        timestep_cond=timestep_cond,
-                        cross_attention_kwargs=self.cross_attention_kwargs,
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                        **unet_additional_args,
-                    )[0]
+                noise_pred = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep_cond=timestep_cond,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    controls=controls,
+                    return_dict=False,
+                )[0]
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
@@ -1789,9 +1377,6 @@ class StableDiffusionXLTexADiffPipeline(
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
 
                 if XLA_AVAILABLE:
                     xm.mark_step()

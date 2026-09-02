@@ -211,7 +211,6 @@ def run_inference(args, device="cuda"):
         args.controlnet_model_name_or_path,
         vae_model_name_or_path=args.vae_model_name_or_path,
         lora_path=args.lora_path,
-        load_weight_increasement=args.load_weight_increasement,
         enable_xformers_memory_efficient_attention=args.enable_xformers_memory_efficient_attention,
         revision=args.revision,
         variant=args.variant,
@@ -334,7 +333,6 @@ def parse_args():
     parser.add_argument("--variant", type=str, default=None)
     parser.add_argument("--hf_cache_dir", type=str, default=None)
     parser.add_argument("--use_safetensors", action="store_true")
-    parser.add_argument("--load_weight_increasement", action="store_true")
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true")
     parser.add_argument("--color_fix", action="store_true")
 

@@ -22,7 +22,6 @@ def get_pipeline(
     controlnet_model_name_or_path,
     vae_model_name_or_path=None,
     lora_path=None,
-    load_weight_increasement=False,
     enable_xformers_memory_efficient_attention=False,
     revision=None,
     variant=None,
@@ -66,21 +65,10 @@ def get_pipeline(
     pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
     if unet_model_name_or_path is not None:
         print(f"loading unet from {unet_model_name_or_path}")
-        pipeline.load_unet_weights(
-            unet_model_name_or_path,
-            load_weight_increasement=load_weight_increasement,
-            use_safetensors=True,
-            torch_dtype=torch.float16,
-            cache_dir=hf_cache_dir,
-        )
+        pipeline.load_unet_weights(unet_model_name_or_path)
     if controlnet_model_name_or_path is not None:
         print(f"loading minicontrolnet from {controlnet_model_name_or_path}")
-        pipeline.load_minicontrolnet_weights(
-            controlnet_model_name_or_path,
-            use_safetensors=True,
-            torch_dtype=torch.float32,
-            cache_dir=hf_cache_dir,
-        )
+        pipeline.load_minicontrolnet_weights(controlnet_model_name_or_path)
     pipeline.set_progress_bar_config()
     pipeline = pipeline.to(device, dtype=torch.float16)
 

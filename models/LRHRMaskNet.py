@@ -1,14 +1,9 @@
-"""
-v4版本：LR做一次上采样，HR做一次下采样，减少计算量,在v3版本上解决当前问题
-"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-# --------------------------------------------
-# 🔧 Residual Block (Simplified)
-# --------------------------------------------
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -35,9 +30,6 @@ class SEBlock(nn.Module):
         return x * w
 
 
-# --------------------------------------------
-# 🔧 LR Branch (Encoder with Upsampling)
-# --------------------------------------------
 class LRBranch(nn.Module):
     def __init__(self, in_channels=3):
         super().__init__()
@@ -57,9 +49,6 @@ class LRBranch(nn.Module):
         return x
 
 
-# --------------------------------------------
-# 🔧 HR Branch (Encoder)
-# --------------------------------------------
 class HRBranch(nn.Module):
     def __init__(self, in_channels=3):
         super().__init__()
@@ -77,18 +66,10 @@ class HRBranch(nn.Module):
         return x
 
 
-# --------------------------------------------
-# 🔧 Fusion Decoder (U-Net Style with Optimization)
-# --------------------------------------------
 class FusionDecoder(nn.Module):
     def __init__(self, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
-        # self.compress = nn.Sequential(
-        #     nn.Conv2d(512+128, 256, 3,stride=1, padding=1),
-        #     nn.SiLU(inplace=True),
-        # )
-        # 将两路通道对齐到同一宽度后用门控融合（逐像素）
         self.proj_lr = nn.Conv2d(128, 256, 1)
         self.proj_hr = nn.Conv2d(512, 256, 1)
         self.gate = nn.Sequential(
@@ -126,9 +107,6 @@ class FusionDecoder(nn.Module):
         self.up2 = nn.Sequential(
             nn.Conv2d(256 + 256, 256, 3, padding=1), nn.SiLU(inplace=True),
             nn.Conv2d(256, 256, 3, padding=1), nn.SiLU(inplace=True),
-            # nn.Conv2d(256, 256, kernel_size=3, padding=1, groups=256),  # Depthwise
-            # nn.Conv2d(256, 256, kernel_size=1),  # Pointwise
-            # nn.ReLU(inplace=True)
         )
 
         # Final conv layers
@@ -167,9 +145,7 @@ class FusionDecoder(nn.Module):
         return out
 
 
-# --------------------------------------------
-# 🎯 Final Optimized Model
-# --------------------------------------------
+
 class LRHRMaskNet(nn.Module):
     def __init__(self, in_channels=3):
         super().__init__()
@@ -188,51 +164,4 @@ class LRHRMaskNet(nn.Module):
 
         out = self.decoder(lr_feat, hr_feat)
         return out
-
-if __name__ == "__main__":
-    import torch
-
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Device] {device}")
-
-    # 建模
-    model = LRHRMaskNet(in_channels=3).to(device)
-    model.eval()
-
-    # ========== Case 1: 方形输入 ==========
-    lr = torch.randn(1, 3, 64, 64, device=device)
-    hr = torch.randn(1, 3, 256, 256, device=device)  # 4x
-    with torch.no_grad():
-        out = model(lr, hr)
-    print(f"[Case1] out shape = {tuple(out.shape)}  (expect 1×1×256×256)")
-
-    # ========== Case 2: 非方形输入 ==========
-    lr2 = torch.randn(2, 3, 48, 72, device=device)
-    hr2 = torch.randn(2, 3, 192, 288, device=device)  # 4x
-    with torch.no_grad():
-        out2 = model(lr2, hr2)
-    print(f"[Case2] out shape = {tuple(out2.shape)}  (expect 2×1×192×288)")
-
-    # ========== 反向传播/梯度检查 ==========
-    model.train()
-    lr.requires_grad_()
-    hr.requires_grad_()
-    out3 = model(lr, hr)          # 1×1×256×256
-    loss = out3.mean()
-    loss.backward()
-    total_grad = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            total_grad += p.grad.abs().sum().item()
-    print(f"[Backward] loss={loss.item():.6f}, total_grad_sum={total_grad:.2f}")
-
-    # ========== 断言检查（应报错） ==========
-    try:
-        model.eval()
-        bad_hr = torch.randn(1, 3, 250, 250, device=device)  # 非 4x 且奇数边
-        with torch.no_grad():
-            _ = model(lr, bad_hr)
-    except AssertionError as e:
-        print(f"[Assert OK] Caught expected assertion: {e}")
 
